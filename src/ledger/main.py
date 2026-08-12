@@ -13,6 +13,7 @@ from ledger.db import SessionFactory, engine
 from ledger.errors import LedgerError
 from ledger.idempotency import IdempotencyCache
 from ledger.metrics import REGISTRY
+from ledger.ratelimit import RateLimiter
 
 
 def _build_cache() -> IdempotencyCache:
@@ -32,7 +33,9 @@ def _build_cache() -> IdempotencyCache:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.session_factory = SessionFactory
-    app.state.idempotency_cache = _build_cache()
+    cache = _build_cache()
+    app.state.idempotency_cache = cache
+    app.state.rate_limiter = RateLimiter(cache._redis)
     yield
     await app.state.idempotency_cache.close()
     await engine.dispose()

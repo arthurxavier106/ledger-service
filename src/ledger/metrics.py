@@ -70,6 +70,26 @@ idempotency_total = Counter(
     registry=REGISTRY,
 )
 
+webhook_deliveries = Counter(
+    "ledger_webhook_deliveries_total",
+    "Tentativas de entrega de webhook por desfecho",
+    ["outcome"],  # delivered | retry | dead
+    registry=REGISTRY,
+)
+
+outbox_backlog = Gauge(
+    "ledger_outbox_backlog",
+    "Eventos aguardando entrega",
+    registry=REGISTRY,
+)
+
+rate_limit_rejections = Counter(
+    "ledger_rate_limit_rejections_total",
+    "Requisicoes recusadas por rate limit",
+    ["scope"],
+    registry=REGISTRY,
+)
+
 reconciliation_drift = Gauge(
     "ledger_reconciliation_drift",
     "Contas onde balance != SUM(entries). Tem que ser zero.",

@@ -97,3 +97,32 @@ class Page(BaseModel):
     data: list[EntryResponse]
     next_cursor: str | None = None
     has_more: bool = False
+
+
+class CreateWebhookEndpointRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "examples": [{"owner_id": "0190f8c2-1b3a-7c4d-8e5f-6a7b8c9d0e1f",
+                      "url": "https://merchant.example.com/hooks/ledger",
+                      "event_types": ["transaction.posted", "transaction.reversed"]}]
+    })
+
+    owner_id: uuid.UUID
+    url: Annotated[str, Field(pattern=r"^https?://", max_length=2000)]
+    event_types: list[str] = Field(default_factory=list,
+                                   description="Vazio = recebe todos os tipos")
+
+
+class WebhookEndpointResponse(BaseModel):
+    # sem from_attributes de proposito: o segredo e bytes no modelo e nao pode
+    # vazar por mapeamento automatico. Ver api._endpoint_response.
+
+    id: uuid.UUID
+    owner_id: uuid.UUID
+    url: str
+    event_types: list[str]
+    active: bool
+    created_at: dt.datetime
+    secret: str | None = Field(
+        default=None,
+        description="Devolvido APENAS na criacao. Guarde: nao e possivel recuperar depois.",
+    )

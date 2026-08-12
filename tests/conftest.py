@@ -56,7 +56,8 @@ async def session_factory(engine):
         # append-only de entries (que so bloqueia UPDATE/DELETE).
         await conn.execute(
             text(
-                "TRUNCATE idempotency_keys, entries, transactions, accounts"
+                "TRUNCATE outbox, webhook_endpoints, idempotency_keys,"
+                " balance_snapshots, entries, transactions, accounts"
                 " RESTART IDENTITY CASCADE"
             )
         )
@@ -140,6 +141,22 @@ def account_factory(session_factory):
 
 
 @pytest.fixture
+def redis_client():
+    from fakeredis.aioredis import FakeRedis
+
+    return FakeRedis(decode_responses=True)
+
+
+@pytest.fixture
+def rate_limiter(redis_client):
+    """Limite alto por padrao: os testes de API nao devem esbarrar nele.
+    Os testes de rate limit constroem o proprio com limite baixo."""
+    from ledger.ratelimit import RateLimiter
+
+    return RateLimiter(redis_client, limit=10_000, window_seconds=60)
+
+
+@pytest.fixture
 def cache():
     """Redis falso: exercita o caminho com cache sem exigir infra na suite."""
     from fakeredis.aioredis import FakeRedis
@@ -154,7 +171,7 @@ def no_cache():
 
 
 @pytest_asyncio.fixture
-async def client(session_factory, cache):
+async def client(session_factory, cache, rate_limiter):
     """Cliente ASGI apontando para o Postgres de teste e o cache falso."""
     from httpx import ASGITransport, AsyncClient
 
@@ -162,6 +179,29 @@ async def client(session_factory, cache):
 
     app.state.session_factory = session_factory
     app.state.idempotency_cache = cache
+    app.state.rate_limiter = rate_limiter
     async with AsyncClient(transport=ASGITransport(app=app),
                            base_url="http://test") as http_client:
         yield http_client
+
+
+@pytest.fixture
+def webhook_factory(session_factory):
+    """Cria endpoints de webhook e devolve (endpoint, secret)."""
+    import secrets as _secrets
+
+    from ledger.models import WebhookEndpoint
+
+    async def _factory(*, url: str = "https://merchant.example/hook",
+                       event_types: list[str] | None = None, active: bool = True):
+        secret = _secrets.token_bytes(32)
+        endpoint = WebhookEndpoint(
+            id=uuid7(), owner_id=uuid7(), url=url, secret=secret,
+            event_types=event_types or [], active=active,
+        )
+        async with session_factory() as s:
+            s.add(endpoint)
+            await s.commit()
+        return endpoint, secret
+
+    return _factory

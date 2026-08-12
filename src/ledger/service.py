@@ -42,6 +42,7 @@ from ledger.models import (
     TransactionKind,
     TransactionStatus,
 )
+from ledger.outbox import enqueue
 
 SQLSTATE_SERIALIZATION_FAILURE = "40001"
 SQLSTATE_DEADLOCK_DETECTED = "40P01"
@@ -179,6 +180,23 @@ async def post_transfer(session: AsyncSession, req: TransferRequest) -> Transact
               amount=req.amount, currency=req.currency, balance_after=credit_balance),
     ])
     await session.flush()
+
+    # Evento na MESMA transacao: se a transferencia commitou, o evento existe;
+    # se nao commitou, o evento nao existe. Nunca ha divergencia entre os dois.
+    await enqueue(
+        session,
+        event_type="transaction.posted",
+        aggregate_id=txn.id,
+        payload={
+            "transaction_id": str(txn.id),
+            "kind": txn.kind.value,
+            "amount": req.amount,
+            "currency": req.currency,
+            "from_account_id": str(src.id),
+            "to_account_id": str(dst.id),
+            "external_ref": req.external_ref,
+        },
+    )
     return txn
 
 
@@ -288,6 +306,18 @@ async def post_reversal(session: AsyncSession, req: ReversalRequest) -> Transact
     ])
     original.status = TransactionStatus.REVERSED
     await session.flush()
+
+    await enqueue(
+        session,
+        event_type="transaction.reversed",
+        aggregate_id=reversal.id,
+        payload={
+            "transaction_id": str(reversal.id),
+            "reverses_transaction_id": str(original.id),
+            "kind": reversal.kind.value,
+            "external_ref": req.external_ref,
+        },
+    )
     return reversal
 
 

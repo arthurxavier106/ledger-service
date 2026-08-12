@@ -7,6 +7,7 @@ outbox e /metrics entram na proxima fatia -- ver README, secao Roadmap.
 from __future__ import annotations
 
 import base64
+import secrets
 import uuid
 from collections.abc import AsyncIterator
 from typing import Annotated
@@ -16,18 +17,27 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from ledger.errors import AccountNotFoundError, LedgerError, TransactionNotFoundError
+from ledger import metrics
+from ledger.errors import (
+    AccountNotFoundError,
+    LedgerError,
+    RateLimitExceededError,
+    TransactionNotFoundError,
+)
 from ledger.idempotency import IdempotencyCache, execute_idempotent
 from ledger.ids import uuid7
-from ledger.models import Account, Entry, Transaction
+from ledger.models import Account, Entry, Transaction, WebhookEndpoint
+from ledger.ratelimit import RateLimiter
 from ledger.schemas import (
     AccountResponse,
     CreateAccountRequest,
+    CreateWebhookEndpointRequest,
     EntryResponse,
     Page,
     ReversalRequestBody,
     TransactionResponse,
     TransferRequestBody,
+    WebhookEndpointResponse,
 )
 from ledger.service import ReversalRequest, TransferRequest, post_reversal, post_transfer
 
@@ -48,6 +58,31 @@ def get_cache(request: Request) -> IdempotencyCache:
 
 
 CacheDep = Annotated[IdempotencyCache, Depends(get_cache)]
+
+
+def get_rate_limiter(request: Request) -> RateLimiter:
+    return request.app.state.rate_limiter
+
+
+async def enforce_rate_limit(
+    request: Request,
+    limiter: Annotated[RateLimiter, Depends(get_rate_limiter)],
+) -> None:
+    """Escopo por API key quando houver, senao por IP.
+
+    Aplicado so nas rotas de escrita: leitura e barata e nao move dinheiro.
+    """
+    api_key = request.headers.get("X-API-Key")
+    client_host = request.client.host if request.client else "unknown"
+    scope = f"key:{api_key}" if api_key else f"ip:{client_host}"
+
+    result = await limiter.check(scope)
+    if not result.allowed:
+        metrics.rate_limit_rejections.labels(scope="write").inc()
+        raise RateLimitExceededError(result.limit, result.retry_after_seconds)
+
+
+RateLimited = Depends(enforce_rate_limit)
 
 IdempotencyKeyHeader = Annotated[
     str | None,
@@ -89,10 +124,14 @@ def _decode_cursor(cursor: str | None) -> int | None:
 async def ledger_error_handler(_: Request, exc: LedgerError) -> JSONResponse:
     """RFC 9457 (application/problem+json). O campo `type` e estavel: e o que o
     cliente programa em cima, nao a mensagem."""
+    headers = {}
+    if isinstance(exc, RateLimitExceededError):
+        headers["Retry-After"] = str(exc.retry_after_seconds)
     return JSONResponse(
         status_code=exc.status_code,
         content=exc.problem(),
         media_type="application/problem+json",
+        headers=headers,
     )
 
 
@@ -162,7 +201,8 @@ async def _serialize(session: AsyncSession, txn: Transaction) -> dict:
     ).model_dump(mode="json")
 
 
-@router.post("/transfers", response_model=TransactionResponse, status_code=201)
+@router.post("/transfers", response_model=TransactionResponse, status_code=201,
+             dependencies=[RateLimited])
 async def create_transfer(
     body: TransferRequestBody,
     factory: FactoryDep,
@@ -194,7 +234,8 @@ async def create_transfer(
 
 
 @router.post("/transactions/{transaction_id}/reversal",
-             response_model=TransactionResponse, status_code=201)
+             response_model=TransactionResponse, status_code=201,
+             dependencies=[RateLimited])
 async def create_reversal(
     transaction_id: uuid.UUID,
     factory: FactoryDep,
@@ -237,3 +278,48 @@ async def get_transaction(transaction_id: uuid.UUID, session: SessionDep) -> Tra
     if txn is None:
         raise TransactionNotFoundError(transaction_id)
     return TransactionResponse.model_validate(await _serialize(session, txn))
+
+
+def _endpoint_response(
+    endpoint: WebhookEndpoint, *, secret: bytes | None = None
+) -> WebhookEndpointResponse:
+    """Monta a resposta explicitamente em vez de mapear do ORM.
+
+    O modelo tem `secret` em bytes; expor por from_attributes vazaria o segredo em
+    toda listagem (e nem sequer serializa). Construir na mao garante que ele so sai
+    quando a rota decide entregar.
+    """
+    return WebhookEndpointResponse(
+        id=endpoint.id,
+        owner_id=endpoint.owner_id,
+        url=endpoint.url,
+        event_types=list(endpoint.event_types),
+        active=endpoint.active,
+        created_at=endpoint.created_at,
+        secret=secret.hex() if secret is not None else None,
+    )
+
+
+@router.post("/webhook-endpoints", response_model=WebhookEndpointResponse, status_code=201)
+async def create_webhook_endpoint(
+    body: CreateWebhookEndpointRequest, session: SessionDep
+) -> WebhookEndpointResponse:
+    """Registra um destino de webhook.
+
+    O segredo e devolvido UMA unica vez, na criacao -- guardamos apenas os bytes
+    para assinar. Mesmo padrao do Stripe: se o cliente perder, rotaciona.
+    """
+    secret = secrets.token_bytes(32)
+    endpoint = WebhookEndpoint(
+        id=uuid7(), owner_id=body.owner_id, url=body.url,
+        secret=secret, event_types=body.event_types, active=True,
+    )
+    session.add(endpoint)
+    await session.commit()
+    return _endpoint_response(endpoint, secret=secret)
+
+
+@router.get("/webhook-endpoints", response_model=list[WebhookEndpointResponse])
+async def list_webhook_endpoints(session: SessionDep) -> list[WebhookEndpointResponse]:
+    result = await session.execute(select(WebhookEndpoint).order_by(WebhookEndpoint.created_at))
+    return [_endpoint_response(e) for e in result.scalars().all()]

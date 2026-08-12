@@ -193,3 +193,67 @@ async def test_openapi_documents_idempotency_header(client):
     names = {p["name"] for p in params}
     assert "Idempotency-Key" in names
     assert "/v1/transactions/{transaction_id}/reversal" in schema["paths"]
+
+
+# --- rate limiting na borda -----------------------------------------------
+async def test_rate_limit_returns_429_with_retry_after(client, redis_client):
+    from ledger.main import app
+    from ledger.ratelimit import RateLimiter
+
+    app.state.rate_limiter = RateLimiter(redis_client, limit=3, window_seconds=60)
+
+    funding = await _create_account(client, allow_negative=True)
+    payer = await _create_account(client)
+    merchant = await _create_account(client)
+    body = {"from_account_id": funding["id"], "to_account_id": payer["id"],
+            "amount": 10, "currency": "BRL"}
+
+    statuses = [(await client.post("/v1/transfers", json=body)).status_code for _ in range(5)]
+    assert statuses[:3] == [201, 201, 201]
+    assert statuses[3:] == [429, 429]
+
+    blocked = await client.post("/v1/transfers", json={
+        "from_account_id": payer["id"], "to_account_id": merchant["id"],
+        "amount": 10, "currency": "BRL"})
+    assert blocked.status_code == 429
+    assert blocked.headers["content-type"].startswith("application/problem+json")
+    assert int(blocked.headers["Retry-After"]) >= 1
+    problem = blocked.json()
+    assert problem["type"] == "https://ledger.dev/errors/rate-limit-exceeded"
+    assert problem["limit"] == 3
+
+
+async def test_reads_are_not_rate_limited(client, redis_client):
+    """Leitura e barata e nao move dinheiro: o limite so vale para escrita."""
+    from ledger.main import app
+    from ledger.ratelimit import RateLimiter
+
+    app.state.rate_limiter = RateLimiter(redis_client, limit=1, window_seconds=60)
+    account = await _create_account(client)
+
+    statuses = [(await client.get(f"/v1/accounts/{account['id']}")).status_code
+                for _ in range(5)]
+    assert statuses == [200] * 5
+
+
+# --- webhook endpoints -----------------------------------------------------
+async def test_webhook_endpoint_returns_secret_only_once(client):
+    created = await client.post("/v1/webhook-endpoints", json={
+        "owner_id": str(uuid.uuid4()),
+        "url": "https://merchant.example.com/hooks/ledger",
+        "event_types": ["transaction.posted"]})
+
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert len(body["secret"]) == 64, "32 bytes em hex"
+    assert body["event_types"] == ["transaction.posted"]
+
+    listed = (await client.get("/v1/webhook-endpoints")).json()
+    assert len(listed) == 1
+    assert listed[0]["secret"] is None, "o segredo nao pode ser recuperavel depois"
+
+
+async def test_webhook_endpoint_rejects_non_http_url(client):
+    response = await client.post("/v1/webhook-endpoints", json={
+        "owner_id": str(uuid.uuid4()), "url": "ftp://nope.example.com"})
+    assert response.status_code == 422

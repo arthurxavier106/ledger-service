@@ -125,3 +125,18 @@ class LedgerInvariantError(LedgerError):
 
     def problem(self) -> dict:
         return super().problem() | {"constraint": self.constraint}
+
+
+class RateLimitExceededError(LedgerError):
+    status_code = 429
+    error_type = "https://ledger.dev/errors/rate-limit-exceeded"
+    title = "Too many requests"
+
+    def __init__(self, limit: int, retry_after_seconds: int) -> None:
+        self.limit = limit
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(f"Rate limit of {limit} requests exceeded")
+
+    def problem(self) -> dict:
+        return super().problem() | {"limit": self.limit,
+                                    "retry_after": self.retry_after_seconds}

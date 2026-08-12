@@ -729,22 +729,36 @@ Quatro processos no Compose: `api`, `outbox-worker`, `postgres`, `redis` — mai
 
 ---
 
-## 11. O que eu preciso que você revise
+## 11. Decisões tomadas na revisão
 
-Pontos onde a decisão pode ir para o outro lado e eu prefiro não escrever código antes de você
-opinar:
+Os pontos que ficaram em aberto na v0 deste documento foram fechados assim, e o
+código reflete cada um:
 
-1. **§4.2, mitigação de ordenação de lock:** dois `SELECT ... FOR UPDATE` sequenciais (proposto)
-   ou `pg_advisory_xact_lock`? O primeiro custa um round-trip, o segundo depende de hash e é
-   menos óbvio de ler.
-2. **`entries.id` `BIGINT` vs UUIDv7.** Escolhi `BIGINT` por tamanho de índice, aceitando a
-   inconsistência com `accounts.id`. Se você preferir uniformidade, muda agora e não depois.
-3. **`CONSTRAINT TRIGGER` vs validação só na aplicação.** O trigger é forte mas atrapalha o
-   particionamento futuro (§9.3). Vale o atrito?
-4. **Escopo do estorno:** só total, ou parcial também? Parcial exige `reversed_amount` acumulado
-   em `transactions` e muda I4 de "no máximo um" para "soma dos estornos ≤ original".
-5. **Tabela `currencies` como FK** ou `CHAR(3)` solto com validação no Pydantic?
+| # | Questão | Decisão | Onde |
+|---|---|---|---|
+| 1 | Ordenação de lock: dois `SELECT FOR UPDATE` sequenciais ou `pg_advisory_xact_lock`? | **Dois SELECT sequenciais.** A ordem não depende do planner e o custo do round-trip extra aparece medido no load test. | `service._lock_accounts` |
+| 2 | `entries.id` `BIGINT` vs UUIDv7 | **`BIGINT`.** `entries` é a tabela que cresce sem parar e nunca é referenciada externamente: 8 bytes contra 16 em cada linha e cada índice. Inconsistência consciente com `accounts.id`. | `sql/0001_up.sql` |
+| 3 | `CONSTRAINT TRIGGER` vs validação só na aplicação | **Trigger.** Vale o atrito com particionamento futuro: a invariante fica impossível de violar, inclusive por `psql`. | `assert_transaction_balanced` |
+| 4 | Estorno parcial? | **Só total.** Parcial mudaria I4 de "no máximo um" para "soma dos estornos ≤ original" e é escopo próprio. | §9, limitação |
+| 5 | `currencies` como FK | **FK.** Custo próximo de zero e elimina `currency='BRLL'` chegando em produção. | `sql/0001_up.sql` |
 
-Aprovado o que estiver acima, a ordem de implementação é: migrations + invariantes →
-testes de concorrência (falhando) → serviço de transferência → idempotência → outbox →
-métricas → CI → load test → README com os números reais.
+### Correções que só apareceram ao rodar
+
+Três problemas que o design não previu e os testes/medições pegaram:
+
+1. **Ordenar o lock não bastava.** Os `UPDATE` de saldo iam na ordem origem→destino.
+   Sob `serializable`, onde não há lock explícito, a ordem dos UPDATEs *é* a ordem de
+   aquisição de lock — 95 de 100 transferências bidirecionais deadlockavam. A regra
+   correta é mais ampla: **toda escrita em `accounts` respeita a ordem global**.
+
+2. **O estorno checava o status antes de travar.** Os perdedores de uma corrida liam
+   `posted` obsoleto e morriam adiante com "saldo insuficiente" — erro tecnicamente
+   verdadeiro e semanticamente errado. Passou a travar `transactions` antes de decidir,
+   o que fixou também a ordem de lock entre tabelas.
+
+3. **Degradação sem circuit breaker é armadilha.** Com o Redis fora, cada requisição
+   pagava o timeout de conexão: p50 de 920 ms. Correto e inutilizável ao mesmo tempo.
+
+Ordem de implementação seguida: migrations + invariantes → testes de concorrência →
+serviço de transferência → idempotência → estorno → métricas → CI → load test → outbox
+→ rate limiting → reconciliação.

@@ -16,7 +16,6 @@ import datetime as dt
 import hashlib
 import json
 import logging
-import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -26,6 +25,7 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ledger.circuit import CircuitBreaker
 from ledger.errors import IdempotencyInFlightError, IdempotencyKeyReuseError
 from ledger.models import IdempotencyKey, IdempotencyStatus
 from ledger.service import run_in_transaction
@@ -74,29 +74,23 @@ class IdempotencyCache:
                  failure_threshold: int = 3, cooldown_seconds: float = 30.0) -> None:
         self._redis = redis
         self._ttl = ttl_seconds
-        self._failure_threshold = failure_threshold
-        self._cooldown = cooldown_seconds
-        self._consecutive_failures = 0
-        self._open_until = 0.0
+        self._breaker = CircuitBreaker(
+            "idempotency-cache", failure_threshold=failure_threshold,
+            cooldown_seconds=cooldown_seconds,
+        )
 
     @property
     def circuit_open(self) -> bool:
-        return time.monotonic() < self._open_until
+        return self._breaker.is_open
 
     def _usable(self) -> bool:
-        return self._redis is not None and not self.circuit_open
+        return self._redis is not None and not self._breaker.is_open
 
     def _on_failure(self) -> None:
-        self._consecutive_failures += 1
-        if self._consecutive_failures >= self._failure_threshold and not self.circuit_open:
-            self._open_until = time.monotonic() + self._cooldown
-            logger.warning(
-                "idempotency cache circuit opened for %.0fs after %d failures",
-                self._cooldown, self._consecutive_failures,
-            )
+        self._breaker.record_failure()
 
     def _on_success(self) -> None:
-        self._consecutive_failures = 0
+        self._breaker.record_success()
 
     @staticmethod
     def _redis_key(scope: str, key: str) -> str:

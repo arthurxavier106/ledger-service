@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Identity,
     Integer,
+    LargeBinary,
     SmallInteger,
     Text,
     func,
@@ -167,3 +168,56 @@ class IdempotencyKey(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class OutboxStatus(StrEnum):
+    PENDING = "pending"
+    DELIVERING = "delivering"
+    DELIVERED = "delivered"
+    DEAD = "dead"
+
+
+class WebhookEndpoint(Base):
+    __tablename__ = "webhook_endpoints"
+
+    id: Mapped[uuid.UUID] = mapped_column(postgresql.UUID(as_uuid=True), primary_key=True)
+    owner_id: Mapped[uuid.UUID] = mapped_column(postgresql.UUID(as_uuid=True), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    secret: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    event_types: Mapped[list[str]] = mapped_column(
+        postgresql.ARRAY(Text), nullable=False, default=list
+    )
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class OutboxEvent(Base):
+    """Evento gravado na mesma transacao do lancamento que o originou."""
+
+    __tablename__ = "outbox"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    endpoint_id: Mapped[uuid.UUID] = mapped_column(
+        postgresql.UUID(as_uuid=True), ForeignKey("webhook_endpoints.id"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    aggregate_id: Mapped[uuid.UUID] = mapped_column(
+        postgresql.UUID(as_uuid=True), nullable=False
+    )
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    status: Mapped[OutboxStatus] = mapped_column(
+        _pg_enum(OutboxStatus, "outbox_status"), nullable=False, default=OutboxStatus.PENDING
+    )
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    delivered_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

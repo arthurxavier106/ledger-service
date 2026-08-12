@@ -52,5 +52,16 @@ services:
       redis: {condition: service_healthy}
       migrate: {condition: service_completed_successfully}
 
+  outbox-worker:
+    build: .
+    command: ["python", "-m", "ledger.worker"]
+    environment:
+      LEDGER_DATABASE_URL: postgresql+asyncpg://ledger:ledger@postgres:5432/ledger
+      LEDGER_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+
 volumes:
   pgdata:
