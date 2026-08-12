@@ -1,0 +1,14 @@
+DROP TABLE IF EXISTS balance_snapshots;
+DROP TRIGGER IF EXISTS entries_immutable_trg ON entries;
+DROP TRIGGER IF EXISTS entries_balanced_trg  ON entries;
+DROP FUNCTION IF EXISTS entries_are_immutable();
+DROP FUNCTION IF EXISTS assert_transaction_balanced();
+DROP TABLE IF EXISTS entries;
+DROP TABLE IF EXISTS transactions;
+DROP TABLE IF EXISTS accounts;
+DROP TABLE IF EXISTS currencies;
+DROP TYPE IF EXISTS entry_direction;
+DROP TYPE IF EXISTS transaction_status;
+DROP TYPE IF EXISTS transaction_kind;
+DROP TYPE IF EXISTS account_status;
+DROP TYPE IF EXISTS account_type;

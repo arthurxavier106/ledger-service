@@ -1,0 +1,56 @@
+name: ledger
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ledger
+      POSTGRES_DB: ledger
+    command:
+      - postgres
+      - -c
+      - max_connections=300
+      - -c
+      - shared_buffers=256MB
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger -d ledger"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "no", "--maxmemory-policy", "allkeys-lru"]
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      LEDGER_DATABASE_URL: postgresql+asyncpg://ledger:ledger@postgres:5432/ledger
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  api:
+    build: .
+    command: ["uvicorn", "ledger.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      LEDGER_DATABASE_URL: postgresql+asyncpg://ledger:ledger@postgres:5432/ledger
+      LEDGER_REDIS_URL: redis://redis:6379/0
+      LEDGER_LOCK_STRATEGY: ${LEDGER_LOCK_STRATEGY:-row_lock}
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+
+volumes:
+  pgdata:
