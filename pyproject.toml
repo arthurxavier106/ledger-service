@@ -22,7 +22,10 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.7",
     "httpx>=0.27",
-    "fakeredis>=2.25",
+    # extra [lua]: o rate limiter usa EVAL, e sem lupa o fakeredis levanta na
+    # avaliacao do script -- os testes cairiam no caminho de falha aberta e
+    # passariam sem testar nada. Foi o CI que pegou isso.
+    "fakeredis[lua]>=2.25",
 ]
 loadtest = ["locust>=2.30"]
 

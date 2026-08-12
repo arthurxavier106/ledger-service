@@ -84,3 +84,14 @@ async def test_disabled_limiter_is_permissive():
     limiter = RateLimiter(None, limit=1, window_seconds=60)
     results = [await limiter.check("x") for _ in range(10)]
     assert all(r.allowed for r in results)
+
+
+@pytest.mark.asyncio
+async def test_lua_scripting_is_actually_available(redis):
+    """Guarda-chuva contra 'funciona na minha maquina'.
+
+    Sem o extra fakeredis[lua], o EVAL levanta, o limiter falha aberto e todos os
+    testes acima passariam sem exercitar o script. Este falha alto e explica.
+    """
+    result = await redis.eval("return 1 + 1", 0)
+    assert int(result) == 2, "fakeredis sem suporte a Lua: instale fakeredis[lua]"
