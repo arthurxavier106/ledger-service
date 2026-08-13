@@ -1,12 +1,18 @@
 # Ledger Service
 
+[![CI](https://github.com/arthurxavier106/ledger-service/actions/workflows/ci.yml/badge.svg)](https://github.com/arthurxavier106/ledger-service/actions/workflows/ci.yml)
+[![Cobertura](https://raw.githubusercontent.com/arthurxavier106/ledger-service/badges/coverage.svg)](https://github.com/arthurxavier106/ledger-service/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.12-blue)
+![PostgreSQL](https://img.shields.io/badge/postgresql-17-blue)
+
 API de lançamentos financeiros com double-entry bookkeeping e garantias de
 consistência **verificadas por teste de concorrência contra Postgres real**.
 
 As decisões de arquitetura estão em [`DESIGN.md`](DESIGN.md) — schema, estratégia de
 isolamento, protocolo de idempotência e limitações conhecidas.
 
-**109 testes** contra PostgreSQL real (sem mock, sem SQLite), com os testes de
+**122 testes** e **90 % de cobertura** contra PostgreSQL real (sem mock, sem
+SQLite), com os testes de
 concorrência parametrizados nas duas estratégias de lock.
 
 ---
@@ -233,7 +239,7 @@ ledger_reconciliation_drift         # tem que ser 0
 - [x] Webhooks via transactional outbox + `FOR UPDATE SKIP LOCKED`
 - [x] Rate limiting em Redis com script Lua
 - [x] Job de reconciliação alimentando `ledger_reconciliation_drift`
-- [ ] Badge de cobertura (depende de configurar o Codecov no repo)
+- [x] Badge de cobertura — gerado pelo próprio CI, sem serviço de terceiro
 
 ## Limitações conhecidas
 

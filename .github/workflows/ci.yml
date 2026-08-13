@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -38,7 +41,7 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Lint
-        run: ruff check src tests migrations loadtest
+        run: ruff check src tests migrations loadtest scripts
 
       - name: Migrations aplicam e revertem
         run: |
@@ -46,17 +49,26 @@ jobs:
           alembic downgrade base
 
       - name: Testes (row_lock)
-        run: pytest -q --cov=ledger --cov-report=xml --cov-report=term
+        # cov-fail-under evita o badge apodrecer em silencio: se a cobertura cair
+        # abaixo do piso, o CI quebra antes de publicar um numero bonito.
+        run: pytest -q --cov=ledger --cov-report=xml --cov-report=term --cov-fail-under=85
 
       - name: Testes de concorrencia (serializable)
         env:
           LEDGER_LOCK_STRATEGY: serializable
         run: pytest tests/test_concurrency.py -q
 
-      - uses: codecov/codecov-action@v4
-        with:
-          files: coverage.xml
-          fail_ci_if_error: false
+      - name: Publicar badge de cobertura
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          python scripts/coverage_badge.py coverage.xml coverage.svg
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan badges-tmp
+          git rm -rf --cached . > /dev/null
+          git add -f coverage.svg
+          git commit -m "coverage badge: $(python -c "import sys;sys.path.insert(0,'scripts');from coverage_badge import coverage_percent;print(coverage_percent('coverage.xml'))")%"
+          git push -f origin badges-tmp:badges
 
   build:
     runs-on: ubuntu-latest

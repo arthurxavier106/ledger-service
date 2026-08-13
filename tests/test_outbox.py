@@ -273,3 +273,49 @@ async def test_event_id_is_stable_across_retries(session_factory, account_factor
 
     assert len(seen) == 2
     assert seen[0] == seen[1]
+
+
+# --- worker ----------------------------------------------------------------
+async def test_worker_stops_when_asked(session_factory):
+    """O worker precisa sair no sinal de parada: sem isso o container fica pendurado
+    no shutdown e o orquestrador acaba matando ele no meio de uma entrega."""
+    from ledger.outbox import run_worker
+
+    stop = asyncio.Event()
+    stop.set()
+
+    await asyncio.wait_for(run_worker(session_factory, stop=stop), timeout=5)
+
+
+async def test_worker_drains_the_queue_then_idles(session_factory, account_factory,
+                                                  webhook_factory):
+    import ledger.outbox as outbox_module
+
+    src = await account_factory(balance=10_000)
+    dst = await account_factory()
+    await webhook_factory()
+    for _ in range(3):
+        await execute_transfer(session_factory, TransferRequest(src.id, dst.id, 10, "BRL"))
+
+    stop = asyncio.Event()
+    delivered: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        delivered.append(request.headers["x-ledger-event-id"])
+        if len(delivered) == 3:
+            stop.set()
+        return httpx.Response(200)
+
+    original = httpx.AsyncClient
+
+    def patched(*args, **kwargs):
+        return original(*args, transport=httpx.MockTransport(handler), **kwargs)
+
+    outbox_module.httpx.AsyncClient = patched
+    try:
+        await asyncio.wait_for(outbox_module.run_worker(session_factory, stop=stop), timeout=15)
+    finally:
+        outbox_module.httpx.AsyncClient = original
+
+    assert len(delivered) == 3
+    assert all(e.status == "delivered" for e in await _events(session_factory))
